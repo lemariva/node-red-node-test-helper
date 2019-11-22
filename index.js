@@ -37,7 +37,7 @@ function findRuntimePath() {
     const upPkg = readPkgUp.sync();
     // case 1: we're in NR itself
     if (upPkg.name === 'node-red') {
-        if (checkSemver(upPkg.pkg.version,"<1.0.2")) {
+        if (checkSemver(upPkg.pkg.version,"<0.20.0")) {
             return path.join(path.dirname(upPkg.path), upPkg.pkg.main);
         } else {
             return path.join(path.dirname(upPkg.path),"packages","node_modules","node-red");
@@ -161,7 +161,7 @@ class NodeTestHelper extends EventEmitter {
 
     load(testNode, testFlow, testCredentials, cb) {
         const log = this._log;
-        const logSpy = this._logSpy = this._sandbox.spy(log, 'debug');
+        const logSpy = this._logSpy = this._sandbox.spy(log, 'log');
         logSpy.FATAL = log.FATAL;
         logSpy.ERROR = log.ERROR;
         logSpy.WARN = log.WARN;
@@ -286,12 +286,8 @@ class NodeTestHelper extends EventEmitter {
             this._app(req, res);         
         }).withShutdown();
 
-        this._app.get('/test', (req, res) => {
-            res.json({ hello: 'world' });
-        });
-
         this._RED.init(server, {
-            logging:{console:{level:'debug'}}
+            logging:{console:{level:'info'}}
         });
 
         server.listen(this._listenPort, this._address);
