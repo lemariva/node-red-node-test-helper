@@ -23,7 +23,7 @@ require('should-sinon');
 const request = require('supertest');
 const express = require("express");
 const http = require('http');
-const stoppable = require('stoppable');
+require('http-shutdown').extend();
 const readPkgUp = require('read-pkg-up');
 const semver = require('semver');
 const EventEmitter = require('events').EventEmitter;
@@ -36,8 +36,8 @@ const PROXY_METHODS = ['log', 'status', 'warn', 'error', 'debug', 'trace', 'send
 function findRuntimePath() {
     const upPkg = readPkgUp.sync();
     // case 1: we're in NR itself
-    if (upPkg.pkg.name === 'node-red') {
-        if (checkSemver(upPkg.pkg.version,"<0.20.0")) {
+    if (upPkg.name === 'node-red') {
+        if (checkSemver(upPkg.pkg.version,"<1.0.2")) {
             return path.join(path.dirname(upPkg.path), upPkg.pkg.main);
         } else {
             return path.join(path.dirname(upPkg.path),"packages","node_modules","node-red");
@@ -72,7 +72,7 @@ class NodeTestHelper extends EventEmitter {
 
         this._sandbox = sinon.createSandbox();
 
-        this._address = '127.0.0.1';
+        this._address = '0.0.0.0';
         this._listenPort = 0; // ephemeral
 
         this.init();
@@ -161,7 +161,7 @@ class NodeTestHelper extends EventEmitter {
 
     load(testNode, testFlow, testCredentials, cb) {
         const log = this._log;
-        const logSpy = this._logSpy = this._sandbox.spy(log, 'log');
+        const logSpy = this._logSpy = this._sandbox.spy(log, 'debug');
         logSpy.FATAL = log.FATAL;
         logSpy.ERROR = log.ERROR;
         logSpy.WARN = log.WARN;
@@ -193,14 +193,15 @@ class NodeTestHelper extends EventEmitter {
 
         var storage = {
             getFlows: function () {
-                return Promise.resolve({flows:testFlow,credentials:testCredentials});
+                return Promise.resolve({flows:testFlow,
+                                        credentials:testCredentials});
             }
         };
         // this._settings.logging = {console:{level:'off'}};
         this._settings.available = function() { return false; }
 
         const redNodes = this._redNodes;
-        this._httpAdmin = express();
+        this._httpAdmin = this._app; //express();
         const mockRuntime = {
             nodes: redNodes,
             events: this._events,
@@ -208,15 +209,15 @@ class NodeTestHelper extends EventEmitter {
             settings: this._settings,
             storage: storage,
             log: this._log,
-            nodeApp: express(),
+            nodeApp: this._app, //express(),
             adminApp: this._httpAdmin,
             library: {register: function() {}},
             get server() { return self._server }
         }
 
         redNodes.init(mockRuntime);
-        redNodes.registerType("helper", function (n) {
-            redNodes.createNode(this, n);
+        redNodes.registerType("helper", function helper(config) {
+            redNodes.createNode(this, config);
         });
 
         var red;
@@ -281,20 +282,27 @@ class NodeTestHelper extends EventEmitter {
 
     startServer(done) {
         this._app = express();
-        const server = stoppable(http.createServer((req, res) => {
-            this._app(req, res);
-        }), 0);
+        const server = http.createServer((req, res) => {            
+            this._app(req, res);         
+        }).withShutdown();
 
-        this._RED.init(server,{
-            logging:{console:{level:'off'}}
+        this._app.get('/test', (req, res) => {
+            res.json({ hello: 'world' });
         });
+
+        this._RED.init(server, {
+            logging:{console:{level:'debug'}}
+        });
+
         server.listen(this._listenPort, this._address);
-        server.on('listening', () => {
-            this._port = server.address().port;
+
+        server.on('listening', () => {                  
+            this._port = server.address().port;      
             // internal API
-            this._comms.start();
+            this._comms.start(); 
             done();
-        });
+        })        
+
         this._server = server;
     }
 
@@ -304,7 +312,10 @@ class NodeTestHelper extends EventEmitter {
             try {
                 // internal API
                 this._comms.stop();
-                this._server.stop(done);
+                this._server.shutdown(function() {
+                    console.log('Everything is cleanly shutdown.');
+                    done();
+                  });
             } catch (e) {
                 done();
             }
