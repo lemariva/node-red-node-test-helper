@@ -21,9 +21,10 @@ const should = require('should');
 const fs = require('fs');
 require('should-sinon');
 const request = require('supertest');
+var bodyParser = require("body-parser");
 const express = require("express");
 const http = require('http');
-require('http-shutdown').extend();
+const stoppable = require('stoppable');
 const readPkgUp = require('read-pkg-up');
 const semver = require('semver');
 const EventEmitter = require('events').EventEmitter;
@@ -36,9 +37,9 @@ const PROXY_METHODS = ['log', 'status', 'warn', 'error', 'debug', 'trace', 'send
 function findRuntimePath() {
     const upPkg = readPkgUp.sync();
     // case 1: we're in NR itself
-    if (upPkg.name === 'node-red') {
-        if (checkSemver(upPkg.pkg.version,"<0.20.0")) {
-            return path.join(path.dirname(upPkg.path), upPkg.pkg.main);
+    if (upPkg.packageJson.name === 'node-red') {
+        if (checkSemver(upPkg.packageJson.version,"<0.20.0")) {
+            return path.join(path.dirname(upPkg.path), upPkg.packageJson.main);
         } else {
             return path.join(path.dirname(upPkg.path),"packages","node_modules","node-red");
         }
@@ -48,8 +49,8 @@ function findRuntimePath() {
         return require.resolve('node-red');
     } catch (ignored) {}
     // case 3: NR is installed alongside node-red-node-test-helper
-    if ((upPkg.pkg.dependencies && upPkg.pkg.dependencies['node-red']) ||
-        (upPkg.pkg.devDependencies && upPkg.pkg.devDependencies['node-red'])) {
+    if ((upPkg.packageJson.dependencies && upPkg.packageJson.dependencies['node-red']) ||
+        (upPkg.packageJson.devDependencies && upPkg.packageJson.devDependencies['node-red'])) {
         const dirpath = path.join(path.dirname(upPkg.path), 'node_modules', 'node-red');
         try {
             const pkg = require(path.join(dirpath, 'package.json'));
@@ -72,7 +73,7 @@ class NodeTestHelper extends EventEmitter {
 
         this._sandbox = sinon.createSandbox();
 
-        this._address = '0.0.0.0';
+        this._address = '127.0.0.1';
         this._listenPort = 0; // ephemeral
 
         this.init();
@@ -193,15 +194,17 @@ class NodeTestHelper extends EventEmitter {
 
         var storage = {
             getFlows: function () {
-                return Promise.resolve({flows:testFlow,
-                                        credentials:testCredentials});
+                return Promise.resolve({flows:testFlow,credentials:testCredentials});
             }
         };
         // this._settings.logging = {console:{level:'off'}};
         this._settings.available = function() { return false; }
 
         const redNodes = this._redNodes;
-        this._httpAdmin = this._app; //express();
+        this._httpAdmin = express();
+        this._httpAdmin.use(bodyParser.json({limit:'5mb'}));
+        this._httpAdmin.use(bodyParser.urlencoded({limit:'5mb',extended:true}));
+
         const mockRuntime = {
             nodes: redNodes,
             events: this._events,
@@ -209,15 +212,15 @@ class NodeTestHelper extends EventEmitter {
             settings: this._settings,
             storage: storage,
             log: this._log,
-            nodeApp: this._app, //express(),
+            nodeApp: express(),
             adminApp: this._httpAdmin,
             library: {register: function() {}},
             get server() { return self._server }
         }
 
         redNodes.init(mockRuntime);
-        redNodes.registerType("helper", function helper(config) {
-            redNodes.createNode(this, config);
+        redNodes.registerType("helper", function (n) {
+            redNodes.createNode(this, n);
         });
 
         var red;
@@ -244,18 +247,20 @@ class NodeTestHelper extends EventEmitter {
         } else {
             testNode(red);
         }
-        redNodes.loadFlows()
+        return redNodes.loadFlows()
             .then(() => {
                 redNodes.startFlows();
                 should.deepEqual(testFlow, redNodes.getFlows().flows);
-                cb();
+                if(cb) cb();
             });
     }
 
     unload() {
         // TODO: any other state to remove between tests?
         this._redNodes.clearRegistry();
-        //this._logSpy.restore();   // problems on raspberry pi ?!
+        if(this._logSpy) {
+            this._logSpy.restore();
+        }
         this._sandbox.restore();
 
         // internal API
@@ -282,23 +287,20 @@ class NodeTestHelper extends EventEmitter {
 
     startServer(done) {
         this._app = express();
-        const server = http.createServer((req, res) => {            
-            this._app(req, res);         
-        }).withShutdown();
+        const server = stoppable(http.createServer((req, res) => {
+            this._app(req, res);
+        }), 0);
 
-        this._RED.init(server, {
-            logging:{console:{level:'info'}}
+        this._RED.init(server,{
+            logging:{console:{level:'off'}}
         });
-
         server.listen(this._listenPort, this._address);
-
-        server.on('listening', () => {                  
-            this._port = server.address().port;      
+        server.on('listening', () => {
+            this._port = server.address().port;
             // internal API
-            this._comms.start(); 
+            this._comms.start();
             done();
-        })        
-
+        });
         this._server = server;
     }
 
@@ -308,10 +310,7 @@ class NodeTestHelper extends EventEmitter {
             try {
                 // internal API
                 this._comms.stop();
-                this._server.shutdown(function() {
-                    console.log('Everything is cleanly shutdown.');
-                    done();
-                  });
+                this._server.stop(done);
             } catch (e) {
                 done();
             }
